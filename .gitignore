@@ -1,0 +1,12 @@
+chromedriver-mac-arm64
+private.py
+data/*
+joblib_objects/*
+.DS_store
+__pycache__/
+plan.txt
+model/*
+:memory
+model*
+
+
