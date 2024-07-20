@@ -1,3 +1,3 @@
 [submodule "we_have_ml_at_home"]
 	path = we_have_ml_at_home
-	url = https://github.com/thclough/we_have_ml_at_home
+	url = git@github.com:thclough/we_have_ml_at_home
