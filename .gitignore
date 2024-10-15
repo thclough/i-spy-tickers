@@ -8,5 +8,8 @@ plan.txt
 model/*
 :memory
 model*
-
+*test*
+*backup*
+we_have_ml_at_home/*
+.spyproject/
 
