@@ -14,25 +14,18 @@ import sqlite3
 import json
 import os
 
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import numpy as np
+
 
 #%%
 
-
-# TODO Ideas
-## I hate the way you are getting rid of similar power seqeunces (maintain_longest_sequence)
-
-# COMPLETED
-# add protected tickers to power sequences if match a sequence
-## get rid of stop words for greater word effect and
-## include the cur word in the data for reconstruction
-# Extract power sequences from titles
-# reel in window size maybe to 3
-
-# REJECTED
-# make all lowercase
-# get rid of sentences, (no fragment sentences), because can get these weird separations
+## GLOBAL VARIABLES
 
 
+# for use in v1 cleaning using special tokens
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
           "January", "February", "March", "April", "May", "June", 
@@ -49,6 +42,54 @@ R_PLACEHOLDERS = ["<WEBSITE>",
                   "<ORDINAL>",
                   "<QUANTITY>"] 
 
+def create_currency_dict():
+    """Retrieves currency html table from google developer docs and creates a {symbol:iso_code} dict
+    
+    Returns:
+        cur_dict (dict): {currency symbol: ISO code} dict
+    """
+    src = "https://developers.google.com/public-data/docs/canonical/currencies_csv"
+    
+    response = requests.get(src)
+    
+    soup = BeautifulSoup(response.content, 'html.parser')
+    
+    # Find the table (modify 'table' class if necessary)
+    table = soup.find('table')
+    
+    # Read the table into a DataFrame
+    df = pd.read_html(str(table))[0]
+    df = df.dropna(subset = "symbol")
+    
+    cur_dict = {}
+    for index, row in df.iterrows():
+        symbol = row["symbol"]
+        currency = row["currency"]
+        if symbol and currency and not symbol.isalpha() and "." not in symbol:
+            cur_dict[symbol] = currency
+            
+    # make sure $ is USD (there are multiple currencies that use $)
+    cur_dict["$"] = "USD"
+    
+    return cur_dict
+
+def load_currency_dict(potential_path):
+    """Load the currency dict if available or create a new one and save at potential path"""
+    
+    try:
+        currency_dict = joblib.load(potential_path)
+    except FileNotFoundError:
+        currency_dict = create_currency_dict()
+        joblib.dump(currency_dict, potential_path)
+    
+    return currency_dict
+
+cur_dict_path = "joblib_objects/currency_dict" 
+currency_dict = load_currency_dict(cur_dict_path)
+
+#print(currency_dict)
+
+
 def format_ticker_strs(text_str):
     """ Standardizes yahoo finance ticker indicators
 
@@ -62,7 +103,7 @@ def format_ticker_strs(text_str):
 
     return ticker_str
 
-def replace_numeric(text_str):
+def replace_numeric_v1(text_str):
     """Replace numeric with more meaningful substitutes"""
 
     # replace time
@@ -94,7 +135,25 @@ def replace_numeric(text_str):
     
     return text_str
 
-def misc_cleaning(text_str):
+def replace_numeric(text_str):
+    
+    # replace all digit with pound sign
+    text_str = re.sub(r"\d","#", text_str)
+    
+    # separate nondigit from numbers (based on the pound sign)
+    text_str = re.sub(r"(#(\S*#+)?)", r' \1 ' , text_str)
+    
+    # replace percent with " percent "
+    text_str = text_str.replace("%", " percent ")
+    
+    # replace common currency symbols
+    ## get the currency symbols first
+    for symbol, currency in currency_dict.items():
+        text_str = text_str.replace(symbol, currency)
+        
+    return text_str
+
+def misc_cleaning_v1(text_str):
     """Miscellaneous text cleaning"""
     
     # get rid of possessives # THIS IS BIG
@@ -114,18 +173,56 @@ def misc_cleaning(text_str):
 
     # replace ampersands with "and"
     text_str = re.sub(r"\&","and",text_str)
-
+    
     # website
-    website_pattern = r"(http[s]?://)?(www\.)?[a-zA-Z0-9-\.]+\.(net|com)"
+    website_pattern = r"(http[s]?://)?(www\.)?[a-zA-Z0-9-\.]+\.(net|com|org)"
     text_str = re.sub(website_pattern, " <WEBSITE> ", text_str)
 
     # make sure acronyms are joined together
     text_str = re.sub(r"(?<!\w)([A-Z])\.", r"\1", text_str)
 
     # remove everything else that is not a punctuation and ()
-    text_str = re.sub(r"[^\.\?\!;:\w\d\(\)\s<>\']", "", text_str)
+    text_str = re.sub(r"[^\.\?\!;:\w\d\(\)\s<>\30]", "", text_str)
     
     return text_str
+
+def misc_cleaning(text_str):
+    
+    # get rid of possessives # THIS IS BIG
+    text_str = re.sub(r"[\'\’]s", "", text_str)
+    
+    # plural posessives
+    text_str = re.sub(r"s[\'\’]", "s", text_str)
+    
+    # deal with title of address
+    text_str = re.sub(r'(Mr)\.|(Mrs)\.|(Ms)\.|(Dr)\.', r'\1\2\3\4', text_str)
+    
+    # make sure apostrohpes only sandwiched between letters
+    text_str = re.sub(r"(?<![a-z])'|'(?![a-z])", "", text_str)
+    
+    # replace sentence fragments in parentheses with just the sentence fragment
+    text_str = re.sub(r"\(([^\(\)]*[a-z][^\(\)]*)\)", r'\1', text_str)
+    
+    # replace ampersands with "and"
+    text_str = re.sub(r"\&"," and ",text_str)
+    
+    # replace queries and connectors with spaces
+    # text_str = re.sub(r"(?<![\s#A-Z])[-/:\.\?\=]+(?![A-Z\s#])", r" " ,text_str)
+    text_str = re.sub(r"(?<![\s#(\(A-Z)])[-/:\.\?\=]+(?![(A-Z\))\s#])", r" " ,text_str)
+    
+    # make sure acronyms are joined together
+    text_str = re.sub(r"(?<!\w)([A-Z])\.", r"\1", text_str)
+
+    # remove everything else that is not a punctuation and ()
+    text_str = re.sub(r"(?<!#)[^\.\'\?\!;:\w\d\(\)\s#]", "", text_str)
+    
+    # bring together parenththeses
+    #text_str = re.sub(r"(?<=\([A-Z]+)\s(?=[A-Z]+\))", r"", text_str)
+    # result = re.sub(r"\(([A-Z ]+)\)", lambda m: f"({m.group(1).replace(' ', '')})", text)
+    text_str = re.sub(r"\(([A-Z# ]+)\)", lambda m: f"({m.group(1).replace(' ', '')})", text_str)
+    
+    return text_str
+
 
 def clean_finance_article(text_str):
     """Performs three functions on article to clean before processing"""
@@ -141,7 +238,7 @@ def fragment_sentences(text_str): # might be something wrong with this
         sentence (list) : Array of sentences
     """
     # Split by sentence using lookbehind
-    sentences = re.split(r'(?<=\S[\w>]\s*[\.\?!:;])\s(?=[A-Z])|>>>',text_str) 
+    sentences = re.split(r'(?<=\S[\w>\)]\s*[\.\?!:;])\s(?!#)|>>>',text_str) 
     
     return sentences
 
@@ -155,10 +252,14 @@ def clean_sentence(sentence):
     """
 
     # remove punctuation
-    sentence = re.sub(r"[\.\?\!;:]",' ',sentence)
+    sentence = re.sub(r"(?<!#)[\.\?\!;:](?!#)",' ',sentence)
+    
+    sentence = re.sub(r"\(([A-Z# ]+)\)", lambda m: f"({m.group(1).replace(' ', '')})", sentence)
 
     # only remove periods at the end of strings
     #sentence = re.sub(r'\.\Z', '', sentence)
+    
+    # there are really only hyphenated 
 
     # Remove excess spaces
     clean_sentence = re.sub(r'\s{2,}',' ',sentence)
@@ -169,10 +270,10 @@ def clean_company_name(company_name):
     """Format company name in the same way as sentences are formatted for easier lookup"""
     return clean_finance_article(company_name)
 
-def get_ticker_dict(nsdq_path="data/nsdq_screener.csv", 
-                    otc_path="data/otc_screener.csv", 
-                    mf_path="data/mf_names.csv",
-                    sec_source="data/sec_tickers.json"):
+def get_ticker_dict(nsdq_path="data/preprocessing/nsdq_screener.csv", 
+                    otc_path="data/preprocessing/otc_screener.csv", 
+                    mf_path="data/preprocessing/mf_names.csv",
+                    sec_source="data/preprocessing/sec_tickers.json"):
     """Creates a dictionary {ticker: company_name} using yfinance, SEC, and OTC data.
     
     Args:
@@ -554,6 +655,8 @@ def create_context_examples(vocabulary, no_ticker_sentence_list, power_sequences
     
     Returns:
         
+        sentences_idxs
+        sentences_labels
         
         
     """
@@ -567,6 +670,8 @@ def create_context_examples(vocabulary, no_ticker_sentence_list, power_sequences
         
             # convert the sentence to list of corresponding vocab idxs, list for labels
             vocab_idxs = []
+            lower_idxs = [] # for lower case company names
+            
             labels = []
             
             # loop through the words in the sentence
@@ -628,6 +733,18 @@ def create_context_examples(vocabulary, no_ticker_sentence_list, power_sequences
                 
                 # add to the data if can gather a label
                 # if label is not None:
+                
+                # add lower case positive label
+                if not case_ambiguity:
+                    if label == 1:
+                        # add to vocab if necessary
+                        develop_vocab([cur_word.lower()], vocabulary)
+                        if not lower_idxs:
+                            lower_idxs = vocab_idxs[:] # copy over if the first time
+                        lower_idxs.append(vocabulary[cur_word.lower()])
+                    elif lower_idxs:
+                        lower_idxs.append(vocabulary[cur_word])
+                    
                 labels.append(label)
                 if case_ambiguity and not(cur_word[0]=="<" and cur_word[-1]==">"):
                     cur_word = cur_word.lower()
@@ -637,14 +754,20 @@ def create_context_examples(vocabulary, no_ticker_sentence_list, power_sequences
                 cur_word_idx += 1
         
         # pack list if pack_len passed
-        if pack_len is not None:  
-            for start_idx in range(0, len(labels), pack_len):
-                end_idx = min(start_idx+pack_len, len(labels))
-                sentences_idxs.append(vocab_idxs[start_idx:end_idx])
-                sentences_labels.append(labels[start_idx:end_idx])
-        else:
-            sentences_idxs.append(vocab_idxs)
-            sentences_labels.append(labels)
+        # if pack_len is not None:  
+        #     for start_idx in range(0, len(labels), pack_len):
+        #         end_idx = min(start_idx+pack_len, len(labels))
+        #         sentences_idxs.append(vocab_idxs[start_idx:end_idx])
+        #         sentences_labels.append(labels[start_idx:end_idx])
+        # else:
+        # -2 is beginning of sentence and -1 is the end
+        sentences_idxs.append([-2] + vocab_idxs + [-1])
+        sentences_labels.append([-2] + labels + [-1])
+        
+        # add lower case names for poistives for more robust model
+        if lower_idxs:
+            sentences_idxs.append([-2] + lower_idxs + [-1])
+            sentences_labels.append([-2] + labels + [-1])
         
         # print(sentence)
         # print(test_sentence)
@@ -720,13 +843,11 @@ def get_article(data_path, i_start):
             yield title, article, i-1
         
 
-
 def create_data_set(data_path, example_path, label_path, vocab_dict, stopwords_list, i_start = 0, case_ambiguity=False):
 
     ticker_dict = get_ticker_dict()
     clean_ticker_dict = {ticker: clean_company_name(name) for ticker, name in ticker_dict.items()}
     
-
     counter = 0
     i = i_start
     old_i_place = i
@@ -746,20 +867,20 @@ def create_data_set(data_path, example_path, label_path, vocab_dict, stopwords_l
             
                 clean_art = clean_finance_article(article)
                 clean_title = clean_sentence(clean_finance_article(title)).split()
-
+                
                 clean_s = [clean_sentence(sentence).split() for sentence in fragment_sentences(clean_art)]
 
                 ps_body, nts_body = get_power_sequences(clean_s, clean_ticker_dict, stopwords_list)
                 ps_title, nts_title = get_power_sequences([clean_title], clean_ticker_dict, stopwords_list)
-
+                
                 if not (ps_title or ps_body):
                     ps_title_search = search_title_for_companies(nts_title[0], clean_ticker_dict)
                     if ps_title_search:
                         ps_title = ps_title_search
                 
-                ps = ps_title + ps_body # power sequences
-                nts = nts_title + nts_body# not ticker sentences
-
+                ps = list(set([tuple(p) for p in ps_title]).union(set([tuple(p) for p in ps_body]))) # power sequences
+                nts = nts_title + nts_body # not ticker sentences
+        
                 # develop the vocabulary
                 for sentence in nts:
                     develop_vocab(sentence, vocab_dict, case_ambiguity=case_ambiguity)
@@ -769,15 +890,13 @@ def create_data_set(data_path, example_path, label_path, vocab_dict, stopwords_l
                                                         no_ticker_sentence_list=nts, 
                                                         power_sequences=ps, 
                                                         ticker_dict=ticker_dict,
-                                                        case_ambiguity=case_ambiguity,
-                                                        pack_len=30)
+                                                        case_ambiguity=case_ambiguity)
                 
                 
                 # discharge the context master every so often to relieve memory
                 example_writer.writerows(sentences_idxs)
                 label_writer.writerows(sentences_labels)
                 
-
                 old_i_place = i_place
 
                 counter += 1
@@ -870,9 +989,54 @@ def get_len_longest_row(csv_source):
     
     return len_longest_row
 
-def pad_uneven_csv_rows(csv_source, csv_target, pad_val=np.nan):
+def cut_and_pack_csv_rows(csv_source, csv_target, pack_len, max_len=None):
+    """Discard lines longer than certain lengths (max_len) 
+    and then break them down into multiple lines for efficient storage
+    
+    Args:
+        csv_source (file-like) : source csv file
+        csv_target (file-like) : file to write to
+        pack_len (int) : max size of line segments when breaking down one examepl
+        max_len (int, default = None) : max example length
+    
+    """
+    
+    if max_len is not None and pack_len > max_len:
+        raise Exception("Pack len should be less than the max length of an example line")
+    
+    with ExitStack() as stack:
+
+        source_file = stack.enter_context(open(csv_source))
+        source_reader = csv.reader(source_file)
+        target_file = stack.enter_context(open(csv_target, "w+"))
+        target_writer = csv.writer(target_file)
+        
+        for line in source_reader:
+            if max_len is None or len(line) <= max_len:
+                
+                for start_idx in range(0, len(line), pack_len):
+                    end_idx = min(start_idx+pack_len, len(line))
+                    
+                    target_writer.writerow(line[start_idx:end_idx])
+
+def pad_uneven_csv_rows(csv_source, csv_target, pad_val=np.nan, pad_min=None):
+    """Pad the lines shorter than the longest line or pad_min with pad_val
+    to stretch to length of longest line or pad min when written to a new csv
+    
+    Args:
+        csv_source (file-like) : source csv file
+        csv_target (file-like) : file to write to
+        pad_val (variable,default=np.nan) : what value to pad lines with
+        pad_min (int, default=None) : how long each line should be after padding (>= len of longest line)
+    
+    """
     
     len_longest_row = get_len_longest_row(csv_source)
+    
+    if pad_min is not None:
+        if pad_min < len_longest_row:
+            raise Exception("If a pad min is passed it must be longer than the length of the longest row")
+        len_longest_row = pad_min
 
     with ExitStack() as stack:
 
@@ -897,7 +1061,6 @@ def main():
 
     data_path = "./data/news.txt"
     
-    
     examples_prefix = "sequential_v1_examples"
     labels_prefix = "sequential_v1_labels"
     
@@ -909,11 +1072,15 @@ def main():
     example_unique_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique")
     label_unique_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique")
     
-    example_padded_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique_padded")
-    label_padded_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique_padded")
+    # example_shuffled_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique_shuffled")
+    # label_shuffled_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique_shuffled")
     
-    example_shuffled_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique_padded_shuffled")
-    label_shuffled_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique_padded_shuffled")
+    # example_packed_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique_packed")
+    # label_packed_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique_packed")
+    
+    # example_padded_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique_padded")
+    # label_padded_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique_padded")
+    
     
     vocab_save_path = "./joblib_objects/sequential_vocab"
     # ticker_dict_path = "./joblib_objects/ticker_dict"
@@ -922,399 +1089,193 @@ def main():
     if create_bool:
         vocab_dict = {}
         # add special tokens first to vocab
-        develop_vocab(R_PLACEHOLDERS, vocab_dict)
+        #develop_vocab(R_PLACEHOLDERS, vocab_dict)
         
         #nltk.download("stopwords")
-        # stopwords = stopwords.words("english")
+        stopwords_list = stopwords.words("english")
         # trying out no stopwords because think will be important
-        stopwords_list = []
+        #stopwords_list = []
         
-        create_data_set(data_path, example_path, label_path, vocab_dict, stopwords_list, i_start, case_ambiguity=True)
+        create_data_set(data_path, example_path, label_path, vocab_dict, stopwords_list, i_start, case_ambiguity=False)
         
         joblib.dump(vocab_dict, vocab_save_path)
 
     if data_bool:
         # get unique entries (based both on example and label)
         unique_examples_2(example_path, label_path, example_unique_path, label_unique_path)
-    
-        # pad with none to shortest length
-        pad_uneven_csv_rows(example_unique_path, example_padded_path, None)
-        pad_uneven_csv_rows(label_unique_path, label_padded_path, None)
         
-                            
-        # shuffle
-        rng = np.random.default_rng(seed=100)
-        no_resources.shuffle(source=example_padded_path,
-                              output=example_shuffled_path, 
-                              line_limit=10000,
-                              header_bool=False, 
-                              rng=rng)
+        train_prob, dev_prob, test_prob = .99, .005, .005
+        #train_prob, dev_prob, test_prob = .9, .05, .05
         
-        rng = np.random.default_rng(seed=100)
-        no_resources.shuffle(source=label_padded_path,
-                              output=label_shuffled_path, 
-                              line_limit=10000,
-                              header_bool=False, 
-                              rng=rng)
+        # shuffle and distribute
+        no_resources.chop_up_csv(example_unique_path, {f"{examples_prefix}_train.csv":train_prob, f"{examples_prefix}_dev.csv":dev_prob, f"{examples_prefix}_test.csv":test_prob}, header_flag=False, seed=100)
+        no_resources.chop_up_csv(label_unique_path, {f"{labels_prefix}_train.csv":train_prob, f"{labels_prefix}_dev.csv":dev_prob, f"{labels_prefix}_test.csv":test_prob}, header_flag=False, seed=100)
         
-        no_resources.chop_up_csv(example_shuffled_path, {"seq_v1_examples_train.csv":.99, "seq_v1_examples_dev.csv":.005, "seq_v1_examples_test.csv":.005}, header_flag=False, seed=100)
-        no_resources.chop_up_csv(label_shuffled_path, {"seq_v1_labels_train.csv":.99, "seq_v1_labels_dev.csv":.005, "seq_v1_labels_test.csv":.005}, header_flag=False, seed=100)
+        # perform same task to each of the segmented data sets
+        
+        for prefix in (examples_prefix, labels_prefix):
+            for suffix in ("_train", "_dev", "_test"):
+                
+                orig = create_csv_transform_path(seq_dir, prefix, suffix)
+                packed = create_csv_transform_path(seq_dir, f"{prefix}{suffix}", "_packed")
+                padded = create_csv_transform_path(seq_dir, f"{prefix}{suffix}", "_final")
+                
+                #pack
+                cut_and_pack_csv_rows(orig, packed, 30, max_len=60)
+                
+                os.remove(orig)
+                
+                # pad with Nnone to
+                pad_uneven_csv_rows(packed, padded, None, pad_min=30)
+                
+                os.remove(packed)
+                
+        # #pack
+        # cut_and_pack_csv_rows(example_shuffled_path, example_packed_path, 30, max_len=60)
+        # cut_and_pack_csv_rows(label_shuffled_path, label_packed_path, 30, max_len=60)
+        
+        # # pad with none to
+        # pad_uneven_csv_rows(example_packed_path, example_padded_path, None, pad_min=30)
+        # pad_uneven_csv_rows(label_packed_path, label_padded_path, None, pad_min=30)
+        
+        
+        
         
 if __name__ == "__main__":
     main()
    
 #%%
-def count_lines(source):
-    with open(source) as data_file:
-        reader = csv.reader(data_file)
-        data_lines = sum(1 for line in reader)
+
+def count_starts(csv_name):
+  with open(csv_name) as source_file:
+    reader = csv.reader(source_file)
+    count = 0
+    for line in reader:
+      if line[0] == "-2":
+        count += 1
+  return count
+
+uni_examples = "/Users/Tighe_Clough/Desktop/Programming/Projects/i-spy-tickers/data/sequential/sequential_v1_examples_unique.csv"
+uni_labels = "/Users/Tighe_Clough/Desktop/Programming/Projects/i-spy-tickers/data/sequential/sequential_v1_labels_unique.csv"
+
+train_examples_final = "/Users/Tighe_Clough/Desktop/Programming/Projects/i-spy-tickers/data/sequential/sequential_v1_examples_test_final.csv"
+train_labels_final ="/Users/Tighe_Clough/Desktop/Programming/Projects/i-spy-tickers/data/sequential/sequential_v1_labels_test_final.csv"
+
+raw_examples_train_proto = "/Users/Tighe_Clough/Desktop/Programming/Projects/i-spy-tickers/data/sequential/sequential_v1_examples_proto_train_final.csv"
+raw_labels_train_proto = "/Users/Tighe_Clough/Desktop/Programming/Projects/i-spy-tickers/data/sequential/sequential_v1_labels_proto_train_final.csv"
+
+
+print(count_starts(train_examples_final))
+print(count_starts(train_labels_final))
+
+
+#%%
+
+# csv_source = "./data/sequential/sequential_v1_examples.csv"
+# csv_target = "./data/sequential/sequential_v1_examples_packed.csv"
+
+# cut_and_pack_csv_rows(csv_source, csv_target, 30, max_len=60)
+
+# csv_source = "./data/sequential/sequential_v1_labels.csv"
+# csv_target = "./data/sequential/sequential_v1_labels_packed.csv"
+
+# cut_and_pack_csv_rows(csv_source, csv_target, 30, max_len=60)
+
+
+
+#%%
+# def count_lines(source):
+#     with open(source) as data_file:
+#         reader = csv.reader(data_file)
+#         data_lines = sum(1 for line in reader)
     
-    return data_lines
+#     return data_lines
 
-examples_prefix = "sequential_v1_examples"
-labels_prefix = "sequential_v1_labels"
+# examples_prefix = "sequential_v1_examples"
+# labels_prefix = "sequential_v1_labels"
 
-seq_dir = "./data/sequential"
+# seq_dir = "./data/sequential"
 
-example_path = create_csv_transform_path(seq_dir, examples_prefix, "")
-label_path = create_csv_transform_path(seq_dir, labels_prefix, "")
+# example_path = create_csv_transform_path(seq_dir, examples_prefix, "")
+# label_path = create_csv_transform_path(seq_dir, labels_prefix, "")
 
-example_unique_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique")
-label_unique_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique")
+# example_unique_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique")
+# label_unique_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique")
 
-example_padded_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique_padded")
-label_padded_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique_padded")
-
-example_shuffled_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique_padded_shuffled")
-label_shuffled_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique_padded_shuffled")
-
-print(count_lines("data/sequential/seq_v1_examples_train.csv"))
-print(count_lines("data/sequential/seq_v1_labels_train.csv"))
+# example_padded_path = create_csv_transform_path(seq_dir, examples_prefix, "_unique_padded")
+# label_padded_path = create_csv_transform_path(seq_dir, labels_prefix, "_unique_padded")
 
 
-#%%
-
-# gathering some sentence that won't break
-
-test = "Insider Sell: EVP, Chief Marketing & Strategy Officer Paul Mcnab Sells 15,004 Shares of .... The reported revenue represents a surprise of +2.04% over the Zacks Consensus Estimate of $45.56 million. With the consensus EPS estimate being $0.06, the EPS surprise was 33.33%. Our team is managing this business effectively, and we are building momentum that we believe will result in performance improvements in 2024. For the year was broadly in line with the market average, at 29%. Continuing our 55-year history of paying dividends back to March 1968. This concludes our prepared remarks. And now we're going to talk."
-clean_art = clean_finance_article(test)
-splitted = [clean_sentence(sentence).split() for sentence in fragment_sentences(clean_art)]
-
-print(clean_art)
-print(splitted)
+# print(count_lines("data/sequential/seq_v1_examples_train.csv"))
+# print(count_lines("data/sequential/seq_v1_labels_train.csv"))
 
 
-# perecentages can't do negative
-# numbers create excess space
+# #%%
+
+# # gathering some sentence that won't break
+
+# test = "Insider Sell: EVP, Chief Marketing & Strategy Officer Paul Mcnab Sells 15,004 Shares of .... The reported revenue represents a surprise of +2.04% over the Zacks Consensus Estimate of $45.56 million. With the consensus EPS estimate being $0.06, the EPS surprise was 33.33%. Our team is managing this business effectively, and we are building momentum that we believe will result in performance improvements in 2024. For the year was broadly in line with the market average, at 29%. Continuing our 55-year history of paying dividends back to March 1968. This concludes our prepared remarks. And now we're going to talk."
+# clean_art = clean_finance_article(test)
+# splitted = [clean_sentence(sentence).split() for sentence in fragment_sentences(clean_art)]
+
+# print(clean_art)
+# print(splitted)
 
 
-#%%
+# # percentages can't do negative
+# # numbers create excess space
+
+
+# #%%
 
 
 
 
 
 
-#%%
+# #%%
 
-examples_prefix = "sequential_v1_examples"
-seq_dir = "./data/sequential"
-example_path = create_csv_transform_path(seq_dir, examples_prefix, "")
+# examples_prefix = "sequential_v1_examples"
+# seq_dir = "./data/sequential"
+# example_path = create_csv_transform_path(seq_dir, examples_prefix, "")
 
-vocab = joblib.load("./joblib_objects/sequential_vocab")
+# vocab = joblib.load("./joblib_objects/sequential_vocab")
 
-_, long_line = get_len_longest_row(example_path)
+# _, long_line = get_len_longest_row(example_path)
 
 
 #%%
 
-vocab = joblib.load("./joblib_objects/sequential_vocab_test")
-rev_vocab = {val:key for key, val in vocab.items()}
+# vocab = joblib.load("./joblib_objects/sequential_vocab_test")
+# rev_vocab = {val:key for key, val in vocab.items()}
 
-# 1,0,0,0,0,1,1,1
-# 
+# # 1,0,0,0,0,1,1,1
+# # 
 
 
-for i in [397,195,122,346,46,522,445,162]:
-    print(rev_vocab[i])
+# for i in [140,141,10,11,12,13,14,15,16,17,18,19,20,20,21,22,23]:
+#     print(rev_vocab[i])
 
 
 
 
 # %%
-rev_vocab[19998]
-
-
-#%%
-
-
-print(([(i, rev_vocab[int(word_idx)]) for i, word_idx in enumerate(long_line)]))
-
-
-#%%
-
-example = [508,509,9,138,512,445,33,515,516,9,518,28,520,407,418,409,508,17,445,33,528,529,27,339,532]
-print([rev_vocab[int(word_idx)] for word_idx in example])
-
-
-#%%
-
-# print this longest line 
-
-
-
-
-
-#%%
-
-# example_path = "./data/sequential_v1_examples_test.csv"
-# label_path = "./data/sequential_v1_labels_test.csv"
-# example_unique_path = "./data/sequential_examples_v1_test_unique.csv"
-# label_unique_path = "./data/sequential_labels_v1_test_unique.csv"
-
-# unique_examples_2(example_path, label_path, example_unique_path, label_unique_path, header_flag=False)
+# rev_vocab[19998]
 
 
 # #%%
-# import numpy as np
-
-# rng = np.random.default_rng(seed=100)
-
-# example_path = "./data/sequential_v1_examples_test.csv"
-# label_path = "./data/sequential_v1_labels_test.csv"
-# shuffled_example_path = "./data/sequential_v1_examples_shuffled_test.csv"
-# shuffled_label_path = "./data/sequential_v1_labels_shuffled_test.csv"
 
 
-# no_resources.shuffle(example_path, shuffled_example_path, line_limit=10, rng=rng)
-
-# print()
-
-# rng = np.random.default_rng(seed=100)
-
-# no_resources.shuffle(label_path, shuffled_label_path, line_limit=10, rng=rng)
+# print(([(i, rev_vocab[int(word_idx)]) for i, word_idx in enumerate(long_line)]))
 
 
 # #%%
-# # test chop-up csv
-# no_resources.chop_up_csv(shuffled_example_path, {"seq_examples_train.csv":.8, "seq_examples_dev.csv":.1, "seq_examples_test.csv":.1}, header_flag=False, seed=100)
-# no_resources.chop_up_csv(shuffled_label_path, {"seq_labels_train.csv":.8, "seq_labels_dev.csv":.1, "seq_labels_test.csv":.1}, header_flag=False, seed=100)
 
+# example = [508,509,9,138,512,445,33,515,516,9,518,28,520,407,418,409,508,17,445,33,528,529,27,339,532]
+# print([rev_vocab[int(word_idx)] for word_idx in example])
 
-#%%
 
-# ticker_dict = get_ticker_dict()
-# clean_ticker_dict = {ticker: clean_company_name(name) for ticker, name in ticker_dict.items()}
-# #nltk.download("stopwords")
-# stopwords_en = stopwords.words("english")
-# data_path = "./data/news.txt"
-# i = 0
-# counter = 0
 
-# for title, article, i in get_article(data_path, i):
-#     print(title)
-#     counter += 1
 
-#     # if counter % 1000 == 0:
-#     #     print(f"Finished {counter} articles")
 
-#     # clean_art = clean_finance_article(article)
-#     # clean_title = clean_sentence(clean_finance_article(title)).split()
 
-#     # clean_s = [clean_sentence(sentence).split() for sentence in fragment_sentences(clean_art)]
-
-#     # ps_body, nts_body = get_power_sequences(clean_s, clean_ticker_dict, stopwords_en)
-#     # ps_title, nts_title = get_power_sequences([clean_title], clean_ticker_dict, stopwords_en)
-    
-#     # if not (ps_title or ps_body):
-#     #     ps_title_search = search_title_for_companies(nts_title[0], clean_ticker_dict)
-#     #     if ps_title_search:
-#     #         ps_title = ps_title_search
-
-#     # ps = ps_title + ps_body
-#     # nts = nts_title + nts_body
-
-#     # print(ps)
-#     # print(nts)
-
-# print(counter)
-
-#%%
-# csv_path = "./data/examples2.csv"
-# vocab_path = "./joblib_objects/vocab2"
-
-# vocab = joblib.load(vocab_path)
-# vocab_rev = {y:x for x,y in vocab.items()}
-
-# with open(csv_path) as file:
-#     reader = csv.reader(file)
-#     next(reader)
-#     for line in reader:
-#         word_idxs = line[1:4] + [line[0]] + line[4:7]
-#         label = line[7]
-#         print(word_idxs)
-#         words = [vocab_rev.get(int(idx), "") for idx in word_idxs]
-#         print(vocab_rev[int(line[0])])
-#         print(words)
-#         print(label)
-
-
-#%%
-
-# title = "We really don't know what happened with Nvidia"
-
-# clean_title = clean_sentence(clean_finance_article(title)).split()
-# ps_title, nts_title = get_power_sequences([clean_title], clean_ticker_dict, stopwords_en)
-
-# print(nts_title)
-
-# ps = search_title_for_companies(nts_title[0], clean_ticker_dict)
-
-# print(ps)
-#%%
-
-
-#%%
-## ARTICLE TEST
-
-# ticker_dict = get_ticker_dict()
-
-# data_path = "./data/news.txt"
-
-# raw_article, i, end_flag = get_article(data_path,2206)
-
-# clean_art = clean_finance_article(raw_article)
-
-# clean_s = [clean_sentence(sentence).split() for sentence in fragment_sentences(clean_art)]
-
-# ps, nts = get_power_sequences(clean_s, ticker_dict)
-
-# print(ps)
-# print(nts)
-
-# vocab = {}
-
-# develop_vocabulary(nts, vocab)
-
-# write_context_examples(csv_path = "data/examples.csv", 
-#                             vocabulary = vocab, 
-#                             no_ticker_sentence_list = nts, 
-#                             power_sequences = ps, 
-#                             ticker_dict = ticker_dict)
-
-
-#%%
-# ticker_article = clean_finance_article(raw_article)
-
-# # print(ticker_article)
-
-# sentences = fragment_sentences(ticker_article)
-
-# # #%%
-# # # clean the sentences
-# # for sentence in sentences:
-# #     print(sentence)
-# #     clean = clean_sentence(sentence)
-# #     print(clean)
-
-# for sentence in fragment_sentences(raw_article):
-#     print(sentence)
-#     print(replace_numeric(sentence))
-
-#%%
-
-# this = clean_finance_article("With over (DLTH) $1024 million in 20.2% capital as of (maybe a month earlier) December 2023")
-
-# print(this)
-
-# #%%
-# date_pattern = r"(" + R_MONTHS + r") \d{1,2} \d{4}|\d{1,2}/\d{1,2}/\d{2,4}|(" + R_MONTHS + r") \d{4}"
-# date_pattern2 = r"(" + R_MONTHS + r")(\s\d{1,2}(st|th|nd|rd)?)? \d{4}|\d{1,2}/\d{1,2}/\d{2,4}|(" + R_MONTHS + r") \d{1,2}(st|th|nd|rd)?( \d{4})?"
-# # replace a date with DATE
-# this = re.sub(date_pattern2, "DATE", "We are leaving Sep 20th 2024.")
-
-# print(this)
-# #%%
-# ticker_dict = get_ticker_dict()
-# test_sentence = "Canadian-based mining company B2Gold Corp (NYSE:BTG) is among the high-yield dividend stocks popular among hedge funds. But 20 of these men."
-
-# test = format_ticker_strs(test_sentence)
-
-# print(test)
-# test = re.sub(r"\W\d+\W"," QUANTITY ", test)
-
-
-# print(test)
-
-#%%
-
-# ## PATTERN TEST
-# import re
-
-# text = "Our average active PaperPie brand partners for the first quarter totaled 23,200 compared to 32,200 in the first quarter last year, a decrease of 9,000 or 28%."
-
-# currency_pattern = r"-?([A-Z]{3,}[^\w\s\.:,]|[^\w\s\.:,]|[A-Z]{3,})-?\d[\d,]*\.?\d*(B|b|M|MM|m|K|k)?"
-# text_str = re.sub(currency_pattern, " CURRENCY ", text)
-
-# print(text_str)
-
-
-#%%
-
-# # test_sentence = "Old Dominion (NASDAQ: ODFL) also had an easier y/y tonnage comp in February (down 12.4% a year ago) compared to January (down 7.8%)."
-
-# test_sentence = article
-
-# clean_art = clean_finance_article(test_sentence)
-
-# clean_s = [clean_sentence(sentence).split() for sentence in fragment_sentences(clean_art)]
-
-# ps, nts = get_power_sequences(clean_s, ticker_dict)
-
-# print(ps)
-# print(nts)
-
-
-#%%
-
-# test_str= "and there were 42 people there"
-# print(re.sub(r"(\s|^)\d+(\.\d+)?\s"," <QUANTITY> ", test_str)) # does nto
-
-
-
-
-
-#%%
-# amalgamate the article (the ending is  up from TRENDING)
-## \n replace with ' '
-## Don't append TRENDING or Related Qu0ote
-
-# # get rid of quotes
-# # capitalization fo the first word of a sentence 
-
-# IDEAS
-## try model matching company name you find in article next to ticker, with all mentions of that company name
-## 's at end fo power sequences
-## have to get rid of .'s and ,'s in ticker names when search
-## That match word in your get_company_name_idxs is important
-
-
-# end of article in this form
-
-# TODO
-# how to deal with websites (put in misc cleaning)
-
-# Article title 
-# TRENDING
-# BODY
-#"Related Quotes" (end)
-
-
-# Developing vocabulary and adding context
-# We're going to start with case preserving and just adding words as they are seen
-# and if it fails we can do case ambiguous 
-
-
-## a different vocabulary will be needed for this where every capital word seen also gets a lowercase
-# and can create a 
-# %%
