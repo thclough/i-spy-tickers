@@ -14,4 +14,7 @@ I created a bidirectional LSTM in Tensorflow Keras. I created a custom data load
 
 No extensive hyperparameter tuning was performed except for experimentation with state size (a shift from 32 to 64 units) in the LSTM.
 
-The best model achieved results with an F1 score .830 during evaluation on test set. The model's weakness is false positives on acronyms like "AI" (common acronyms that are also tickers). Error analysis on a sampled section of the eval/dev set indicated the most common error (around half of all errors) was actually that an insignificant amount of positive examples were _mislabeled_ as negative meaning the model learned past the imperfections in the labeling algorithm. This indicated the true value of the F1 metric could be much higher.
+The best model achieved results with an F1 score .818 during evaluation on test set. The model's weakness is false positives on acronyms like "AI" (common acronyms that are also tickers). Error analysis on a sampled section of the eval/dev set indicated the most common error (around half of all errors) was actually that an insignificant amount of positive examples were _mislabeled_ as negative meaning the model learned past the imperfections in the labeling algorithm. This indicated the true value of the F1 metric could be much higher.
+
+Evaluation on test set, 6881 test sentences
+![evaluation output on test set, BiLSTM model](repo-media/BiLSTM_test_metric.png)
